@@ -125,7 +125,8 @@ app.get('/', (req, res) => {
   const challenge = req.query['hub.challenge'];
 
   // === FALLBACK TOKEN FOR TESTING ===
-  const expectedToken = process.env.WEBHOOK_VERIFY_TOKEN || 'mySuperSecret123!@'; // fallback
+  //const expectedToken = process.env.WEBHOOK_VERIFY_TOKEN || 'mySuperSecret123!@'; // fallback
+  const expectedToken = 'mySuperSecret123!@'; // fallback
   const isTestMode = !process.env.WEBHOOK_VERIFY_TOKEN || process.env.NODE_ENV === 'test';
 
   console.log('VERIFY →', {
