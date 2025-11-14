@@ -133,13 +133,14 @@ app.post('/', async (req, res) => {
 });
 
 // ---------- 9. Start server ----------
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Webhook listening on :${PORT}`);
-  console.log('Secrets loaded →', {
-    VERIFY_TOKEN: VERIFY_TOKEN ? 'OK' : 'MISSING',
-    GEMINI_API_KEY: GEMINI_API_KEY ? 'OK' : 'MISSING',
-    BUSINESS_PHONE: BUSINESS_PHONE ? 'OK' : 'MISSING',
+// ---------- 9. Start server ----------
+const PORT = Number(process.env.PORT) || 8080;          // <-- 1. Number()
+app.listen(PORT, '0.0.0.0', () => {                     // <-- 2. bind 0.0.0.0
+  console.log(`Server STARTED on ${PORT}`);
+  console.log('Secrets →', {
+    VERIFY_TOKEN: !!VERIFY_TOKEN,
+    GEMINI_API_KEY: !!GEMINI_API_KEY,
+    BUSINESS_PHONE: !!BUSINESS_PHONE,
   });
 });
 
