@@ -1,1 +1,16 @@
-
+{
+  "name": "whatsapp-webhook",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "@google-cloud/firestore": "^7.9.0",
+    "@google/generative-ai": "^0.21.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
