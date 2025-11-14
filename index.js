@@ -100,22 +100,50 @@ async function handleOrders(changes) {
 //   }
 // });
 
+// app.get('/', (req, res) => {
+//   const mode = req.query['hub.mode'];
+//   const token = req.query['hub.verify_token'];
+//   const challenge = req.query['hub.challenge'];
+
+//   console.log('VERIFY →', { mode, token, expected: process.env.WEBHOOK_VERIFY_TOKEN });
+
+//   if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
+//     console.log('SUCCESS → returning:', challenge);
+//     return res.send(challenge);  // ← MUST be plain text, no HTML
+//   } else {
+//     console.log('FAILED → token mismatch');
+//     return res.status(403).send('Error: Token mismatch');
+//   }
+// });
+
+
+
+// ---------- GET – Webhook verification (with TEST MODE fallback) ----------
 app.get('/', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('VERIFY →', { mode, token, expected: process.env.WEBHOOK_VERIFY_TOKEN });
+  // === FALLBACK TOKEN FOR TESTING ===
+  const expectedToken = process.env.WEBHOOK_VERIFY_TOKEN || 'mySuperSecret123!@'; // fallback
+  const isTestMode = !process.env.WEBHOOK_VERIFY_TOKEN || process.env.NODE_ENV === 'test';
 
-  if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
-    console.log('SUCCESS → returning:', challenge);
-    return res.send(challenge);  // ← MUST be plain text, no HTML
+  console.log('VERIFY →', {
+    mode,
+    token,
+    expected: expectedToken,
+    testMode: isTestMode ? 'YES (fallback used)' : 'NO (Secret Manager)',
+    source: process.env.WEBHOOK_VERIFY_TOKEN ? 'Secret Manager' : 'Fallback'
+  });
+
+  if (mode === 'subscribe' && token === expectedToken) {
+    console.log('SUCCESS → returning challenge:', challenge);
+    return res.send(challenge); // Plain text
   } else {
     console.log('FAILED → token mismatch');
     return res.status(403).send('Error: Token mismatch');
   }
 });
-
 
 
 
