@@ -94,6 +94,6 @@ app.router.add_post("/run", handle_req)
 
 if __name__ == "__main__":
     import os
-    port = int(os.getenv("PORT", 8080))  # Use the Cloud Run environment variable
+    port = int(os.getenv("PORT", 8030))  # Use the Cloud Run environment variable
     web.run_app(app, port=port)
 
