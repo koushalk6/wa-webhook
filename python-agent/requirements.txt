@@ -1,0 +1,4 @@
+aiohttp
+requests
+aiortc
+google-cloud-texttospeech
