@@ -17,8 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY python_service.py ./
 
-ENV PORT=8080
-EXPOSE 8080
+ENV PORT=8030
+EXPOSE 8030
 
 CMD ["python", "python_service.py"]
 
@@ -46,7 +46,7 @@ CMD ["python", "python_service.py"]
 
 # COPY python_service.py .
 
-# ENV PORT=8080
+# ENV PORT=8030
 
 # CMD ["python", "python_service.py"]
 
