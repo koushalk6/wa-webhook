@@ -23,7 +23,7 @@ const SCRIPT_TOKEN = 'your123@655';
 // ---------- Python Call Agent URL ----------
 const PYTHON_CALL_AGENT_URL =
   process.env.PYTHON_CALL_AGENT_URL ||
-  "https://YOUR-PYTHON-CLOUDRUN-URL/run";   // <-- REPLACE AFTER DEPLOYING PYTHON SERVICE
+  "https://python-agent-995267578420.asia-south1.run.app/";   // <-- REPLACE AFTER DEPLOYING PYTHON SERVICE
 
 // ---------- Helper ----------
 function getIndiaTimestamp() {
