@@ -154,7 +154,7 @@ app.post('/webhook', async (req, res) => {
 // ---------- Startup ----------
 (async () => {
   await loadFlowFromGoogleSheet(process.env.GOOGLE_SHEET_ID);
-  const PORT = process.env.PORT1 || 8080;
+  const PORT = 8080;
   app.listen(PORT, () => console.log(`WhatsApp Chatbot running on port ${PORT}`));
 })();
 
