@@ -1,248 +1,348 @@
 
-// index.js
+// index.js - Avasar WhatsApp webhook (Cloud Run ready)
+// --------------------------------------------------
+// ENV needed:
+//  - META_VERIFY_TOKEN        (for GET verification)
+//  - WHATSAPP_TOKEN           (graph api bearer token) - optional if not sending messages
+//  - WHATSAPP_PHONE_ID        (whatsapp phone id used by Graph API) - optional
+//  - GOOGLE_SHEET_ID          (sheet id for loading flow)
+//  - SHEET_REFRESH_SECONDS    (optional, default 300)
+// --------------------------------------------------
+
 require('dotenv').config();
 const express = require('express');
-const fetch = require('node-fetch');
 const NodeCache = require('node-cache');
 const Papa = require('papaparse');
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
 
-// ---------- Cache ----------
-const flowCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+// Body size safe for media/webhooks
+app.use(express.json({ limit: "20mb" }));
 
-// ---------------------------------------------------------------------
-// ✅ META WEBHOOK VERIFICATION (OLD WORKING CODE)
-// ---------------------------------------------------------------------
+// Universal fetch: use global if available else dynamic import node-fetch
+let fetcher = typeof globalThis.fetch === 'function' ? globalThis.fetch : null;
+if (!fetcher) {
+  fetcher = (...args) =>
+    import('node-fetch').then(({ default: f }) => f(...args));
+}
+
+// Config & cache
 const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "mySuperSecret123!@";
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || null;
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || null;
+const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || null;
+const SHEET_REFRESH_SECONDS = Number(process.env.SHEET_REFRESH_SECONDS || 300);
 
-app.get('/', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+const flowCache = new NodeCache({ stdTTL: SHEET_REFRESH_SECONDS, checkperiod: 60 });
 
-  console.log("META VERIFY:", { mode, token, challenge });
+// Fallback node
+const FALLBACK_NODE = {
+  node_id: "fallback",
+  type: "fallback",
+  text: "Welcome to Avasar, I'm Avasar bot, in development today.",
+  ctas: []
+};
 
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log("Webhook verified successfully.");
-    return res.status(200).send(challenge);
+// ---------------------- Google Sheet CSV loader ------------------------
+async function loadFlowFromGoogleSheet() {
+  if (!GOOGLE_SHEET_ID) {
+    console.warn("No GOOGLE_SHEET_ID configured. Using fallback flow only.");
+    flowCache.set("chatFlow", [FALLBACK_NODE]);
+    return [FALLBACK_NODE];
   }
 
-  console.log("Webhook verification failed: Token mismatch");
-  return res.status(403).send("Verification token mismatch");
-});
+  const csvUrl = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/export?format=csv`;
+  console.log("Loading Google Sheet CSV:", csvUrl);
 
-// ---------------------------------------------------------------------
-// 🛑 IMPORTANT
-// Some people configure webhook URL as "/" in Meta.
-// So we MUST also accept POST "/" and redirect to /webhook handler.
-// ---------------------------------------------------------------------
-app.post('/', (req, res) => {
-  console.log("POST / hit → forwarding to /webhook handler");
-
-  // Simply forward req.body to /webhook logic
-  req.url = '/webhook';
-  return webhookHandler(req, res);
-});
-
-
-// =====================================================
-// ---------- Load Google Sheet WITHOUT API KEY ---------
-// =====================================================
-async function loadFlowFromGoogleSheet(sheetId) {
   try {
-    const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+    const resp = await fetcher(csvUrl, { timeout: 20000 });
+    if (!resp || typeof resp.text !== "function") {
+      throw new Error("fetch did not return expected response object");
+    }
 
-    console.log("Loading Google Sheet CSV:", csvUrl);
+    if (!resp.ok) {
+      throw new Error(`Google sheet HTTP ${resp.status}`);
+    }
 
-    const csvText = await fetch(csvUrl).then(r => r.text());
+    const csvText = await resp.text();
 
-    const parsed = Papa.parse(csvText, { header: true });
-    const rows = parsed.data.filter(r => Object.keys(r).length > 1);
+    if (!csvText || csvText.length < 10) {
+      throw new Error("CSV appears empty");
+    }
 
-    const flowData = rows.map(r => {
-      const node = { ...r };
+    const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true, transformHeader: h => h?.trim() });
+    if (parsed.errors && parsed.errors.length) {
+      console.warn("Sheet parse warnings/errors:", parsed.errors.slice(0,3));
+    }
 
-      node.ctas = [];
-      for (let i = 1; i <= 3; i++) {
-        if (r[`cta${i}`] && r[`cta${i}_id`]) {
+    // Map CSV rows to flow nodes (expecting columns like node_id, type, text, keyword, media_url, cta1, cta1_id, cta1_next_id, ...)
+    const rows = parsed.data.map(r => {
+      const node = {
+        node_id: (r.node_id || "").toString(),
+        type: (r.type || "").toString(),
+        text: (r.text || "").toString(),
+        keyword: (r.keyword || "").toString(),
+        media_url: (r.media_url || "").toString(),
+        raw: r,
+        ctas: []
+      };
+
+      for (let i = 1; i <= 5; i++) {
+        const txt = r[`cta${i}`];
+        const id = r[`cta${i}_id`] || r[`cta${i}_payload`];
+        const next = r[`cta${i}_next_id`];
+        if (txt && id) {
           node.ctas.push({
-            text: r[`cta${i}`],
-            id: r[`cta${i}_id`],
-            next_id: r[`cta${i}_next_id`] || null
+            text: txt.toString(),
+            id: id.toString(),
+            next_id: next ? next.toString() : null
           });
         }
       }
-
       return node;
     });
 
-    flowCache.set("chatFlow", flowData);
-    console.log(`Flow loaded successfully: ${flowData.length} nodes`);
-    return flowData;
+    // If result empty, keep fallback
+    const flow = rows.length ? rows : [FALLBACK_NODE];
+    flowCache.set("chatFlow", flow);
+    console.log(`Flow loaded: ${flow.length} nodes`);
+    return flow;
 
   } catch (err) {
-    console.error("Error loading Google Sheet:", err);
-    return [];
+    console.error("Error loading Google Sheet:", err && err.message ? err.message : err);
+    // keep previous cache if any, else set fallback
+    if (!flowCache.get("chatFlow")) flowCache.set("chatFlow", [FALLBACK_NODE]);
+    return flowCache.get("chatFlow");
   }
 }
 
+// schedule periodic reload
+async function ensurePeriodicLoad() {
+  await loadFlowFromGoogleSheet();
+  setInterval(() => {
+    loadFlowFromGoogleSheet().catch(e => console.error("Periodic sheet reload failed:", e));
+  }, Math.max(30, SHEET_REFRESH_SECONDS) * 1000);
+}
 
-// =====================================================
-// ---------- Chatbot Logic Functions -------------------
-// =====================================================
+// ---------------------- Chat flow helpers ------------------------
+function getChatFlow() {
+  const f = flowCache.get("chatFlow");
+  return Array.isArray(f) ? f : [FALLBACK_NODE];
+}
+
 function getNodeByCtaId(ctaId) {
-  const flow = flowCache.get('chatFlow') || [];
+  const flow = getChatFlow();
   for (const node of flow) {
-    const cta = node.ctas.find(c => c.id === ctaId);
-    if (cta) return { node, next_id: cta.next_id };
+    if (Array.isArray(node.ctas)) {
+      const c = node.ctas.find(x => x.id === ctaId);
+      if (c) return { node, next_id: c.next_id };
+    }
   }
   return null;
 }
 
 function getNodeByKeyword(message) {
-  const flow = flowCache.get('chatFlow') || [];
+  if (!message) return null;
+  const flow = getChatFlow();
   for (const node of flow) {
     if (node.type !== 'interactive' && node.keyword) {
-      if (message.toLowerCase().includes(node.keyword.toLowerCase())) {
-        return node;
-      }
+      try {
+        if (message.toLowerCase().includes(node.keyword.toLowerCase())) return node;
+      } catch (_) {}
     }
   }
   return null;
 }
 
-
-// =====================================================
-// ---------- WhatsApp Sender ---------------------------
-// =====================================================
+// ---------------------- WhatsApp sender (safe) ------------------------
 async function sendWhatsAppMessage(phoneNumber, text, ctas = [], media = null) {
-  const token = process.env.WHATSAPP_TOKEN;
-  const phoneId = process.env.WHATSAPP_PHONE_ID;
+  if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_ID) {
+    console.warn("WhatsApp credentials not configured; skipping send. To enable set WHATSAPP_TOKEN & WHATSAPP_PHONE_ID.");
+    return null;
+  }
 
-  const url = `https://graph.facebook.com/v17.0/${phoneId}/messages`;
-
+  const url = `https://graph.facebook.com/v17.0/${WHATSAPP_PHONE_ID}/messages`;
   const body = {
     messaging_product: "whatsapp",
     to: phoneNumber,
-    type: media ? "image" : (ctas.length ? "interactive" : "text")
+    type: media ? "image" : (ctas && ctas.length ? "interactive" : "text")
   };
 
   if (media) {
-    body.type = "image";
     body.image = { link: media };
-
-  } else if (ctas.length) {
-    body.type = "interactive";
+  } else if (ctas && ctas.length) {
     body.interactive = {
       type: "button",
-      body: { text },
-      action: {
-        buttons: ctas.map(c => ({
-          type: "reply",
-          reply: { id: c.id, title: c.text }
-        }))
-      }
+      body: { text: text || "Choose an option" },
+      action: { buttons: ctas.map(c => ({ type: "reply", reply: { id: c.id, title: c.text } })) }
     };
-
   } else {
-    body.text = { body: text };
+    body.text = { body: text || FALLBACK_NODE.text };
   }
 
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
+    const res = await fetcher(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${WHATSAPP_TOKEN}`
       },
       body: JSON.stringify(body)
     });
 
     const json = await res.json();
-    console.log("WhatsApp reply sent:", json);
+    console.log("WhatsApp send response:", json);
     return json;
-
   } catch (err) {
-    console.error("WhatsApp send error:", err);
+    console.error("WhatsApp send error:", err && err.message ? err.message : err);
     return null;
   }
 }
 
+// ---------------------- Meta verification GET / ------------------------
+app.get('/', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
 
-// =====================================================
-// ---------- WEBHOOK HANDLER LOGIC ---------------------
-// =====================================================
-async function webhookHandler(req, res) {
+  console.log("META VERIFY REQUEST:", { mode, token: !!token, challenge: !!challenge });
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log("Webhook verified - sending challenge");
+    return res.status(200).send(challenge);
+  }
+
+  return res.status(403).send("Verification token mismatch");
+});
+
+// ---------------------- Accept POST / root (some setups send to /) -------------
+// Always return 200 immediately to satisfy Meta; process body safely afterwards.
+app.post('/', (req, res) => {
+  // Send 200 immediately as Meta expects quick 200
+  res.sendStatus(200);
+
+  // Process the webhook asynchronously but catch errors
+  processWebhookSafely(req.body).catch(err => console.error("Async processing error:", err));
+});
+
+// Also expose explicit /webhook route
+app.post('/webhook', (req, res) => {
+  // For clients calling /webhook directly, still respond 200 quick
+  res.sendStatus(200);
+  processWebhookSafely(req.body).catch(err => console.error("Async processing error:", err));
+});
+
+// ---------------------- Core webhook processing (safe) ------------------------
+async function processWebhookSafely(body) {
   try {
-    const data = req.body;
-    const entry = data.entry?.[0];
-    if (!entry) return res.sendStatus(200);
-
-    const messages = entry.changes?.[0]?.value?.messages || [];
-
-    for (const msg of messages) {
-      const phone = msg.from;
-      const text = msg.text?.body || "";
-      const ctaId = msg.button?.payload || null;
-
-      let nodeToSend = null;
-
-      // CTA flow
-      if (ctaId) {
-        const result = getNodeByCtaId(ctaId);
-        if (result) {
-          nodeToSend =
-            flowCache.get('chatFlow').find(n => n.node_id === result.next_id)
-            || result.node;
-        }
-      }
-
-      // Keyword flow
-      if (!nodeToSend && text) {
-        nodeToSend = getNodeByKeyword(text);
-      }
-
-      // Fallback
-      if (!nodeToSend) {
-        nodeToSend = flowCache.get('chatFlow').find(n => n.type === 'fallback') || {
-          text: "Sorry, I didn't understand that. Please choose an option.",
-          ctas: []
-        };
-      }
-
-      await sendWhatsAppMessage(
-        phone,
-        nodeToSend.text,
-        nodeToSend.ctas,
-        nodeToSend.media_url || null
-      );
+    if (!body) {
+      console.warn("Empty webhook body received");
+      return;
     }
 
-    res.sendStatus(200);
+    // Typical WhatsApp webhook structure: body.entry[0].changes[0].value.messages[]
+    const entry = body.entry?.[0];
+    if (!entry) {
+      console.log("No entry in webhook; nothing to do.");
+      return;
+    }
 
+    const messages = entry.changes?.[0]?.value?.messages || [];
+    if (!Array.isArray(messages) || messages.length === 0) {
+      console.log("No messages found in webhook entry");
+      return;
+    }
+
+    // Ensure chat flow available
+    let flow = getChatFlow();
+    if (!flow || flow.length === 0) {
+      console.log("Flow empty - attempting reload synchronously");
+      flow = await loadFlowFromGoogleSheet();
+    }
+
+    for (const msg of messages) {
+      try {
+        const phone = msg.from;
+        const text = msg.text?.body || msg?.interactive?.button_reply?.title || "";
+        // button payload or reply id (varies)
+        const ctaId = msg.button?.payload || msg?.interactive?.button_reply?.id || null;
+
+        // Determine node to send
+        let nodeToSend = null;
+
+        if (ctaId) {
+          const result = getNodeByCtaId(ctaId);
+          if (result) {
+            // prefer next_id if present
+            nodeToSend = flow.find(n => n.node_id === result.next_id) || result.node;
+          }
+        }
+
+        if (!nodeToSend && text) {
+          nodeToSend = getNodeByKeyword(text);
+        }
+
+        if (!nodeToSend) {
+          nodeToSend = flow.find(n => n.type === 'fallback') || FALLBACK_NODE;
+        }
+
+        // Send response (do not block other messages)
+        await sendWhatsAppMessage(phone, nodeToSend.text, nodeToSend.ctas || [], nodeToSend.media_url || null);
+      } catch (innerErr) {
+        console.error("Message processing error (single message):", innerErr);
+        // Attempt to send fallback greeting to the user if we have number
+        try {
+          const phoneFallback = msg?.from;
+          if (phoneFallback) {
+            await sendWhatsAppMessage(phoneFallback, FALLBACK_NODE.text, []);
+          }
+        } catch (sendErr) {
+          console.error("Failed to send fallback after message processing error:", sendErr);
+        }
+      }
+    }
   } catch (err) {
-    console.error("Webhook error:", err);
-    res.sendStatus(500);
+    console.error("processWebhookSafely top-level error:", err);
   }
 }
 
-app.post('/webhook', webhookHandler);
+// ---------------------- Admin helpers ------------------------
+app.get('/health', (req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
 
+app.get('/flow', (req, res) => {
+  res.json({ flow: getChatFlow(), rows: getChatFlow().length });
+});
 
-// =====================================================
-// ---------- Startup -----------------------------------
-// =====================================================
+app.get('/reload-flow', async (req, res) => {
+  const flow = await loadFlowFromGoogleSheet();
+  res.json({ reloaded: true, rows: (flow || []).length });
+});
 
+// ---------------------- Startup ------------------------
 (async () => {
-  await loadFlowFromGoogleSheet(process.env.GOOGLE_SHEET_ID);
-
-  const PORT = process.env.PORT || 8080;
-  app.listen(PORT, () =>
-    console.log(`WhatsApp Chatbot running on port ${PORT}`)
-  );
+  try {
+    console.log("Starting Avasar webhook server...");
+    await ensurePeriodicLoad();
+    const PORT = process.env.PORT || 8080;
+    app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+  } catch (err) {
+    console.error("Startup error:", err);
+    process.exit(1);
+  }
 })();
+
+
+
+
+
+
+
+
+
+
+
 
 
 
