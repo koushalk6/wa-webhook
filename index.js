@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const fetch = require('node-fetch');
 const NodeCache = require('node-cache');
-const { GoogleSpreadsheet } = require('google-spreadsheet');
+const Papa = require('papaparse');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -11,36 +11,52 @@ app.use(express.json({ limit: '10mb' }));
 // ---------- Cache ----------
 const flowCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 
-// ---------- Load Google Sheet Flow ----------
+
+// =====================================================
+// ---------- Load Google Sheet WITHOUT API KEY ---------
+// =====================================================
 async function loadFlowFromGoogleSheet(sheetId) {
-  const doc = new GoogleSpreadsheet(sheetId);
-  await doc.useApiKey(process.env.GOOGLE_API_KEY); // public API key
-  await doc.loadInfo();
-  const sheet = doc.sheetsByIndex[0];
-  const rows = await sheet.getRows();
+  try {
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
 
-  const flowData = rows.map(r => {
-    const node = {};
-    sheet.headerValues.forEach(header => node[header] = r[header]);
-    node.ctas = [];
-    for (let i = 1; i <= 3; i++) {
-      if (node[`cta${i}`] && node[`cta${i}_id`]) {
-        node.ctas.push({
-          text: node[`cta${i}`],
-          id: node[`cta${i}_id`],
-          next_id: node[`cta${i}_next_id`] || null
-        });
+    console.log("Loading Google Sheet CSV:", csvUrl);
+
+    const csvText = await fetch(csvUrl).then(r => r.text());
+
+    const parsed = Papa.parse(csvText, { header: true });
+    const rows = parsed.data.filter(r => Object.keys(r).length > 1);
+
+    const flowData = rows.map(r => {
+      const node = { ...r };
+
+      node.ctas = [];
+      for (let i = 1; i <= 3; i++) {
+        if (r[`cta${i}`] && r[`cta${i}_id`]) {
+          node.ctas.push({
+            text: r[`cta${i}`],
+            id: r[`cta${i}_id`],
+            next_id: r[`cta${i}_next_id`] || null
+          });
+        }
       }
-    }
-    return node;
-  });
 
-  flowCache.set('chatFlow', flowData);
-  console.log(`Flow loaded: ${flowData.length} nodes`);
-  return flowData;
+      return node;
+    });
+
+    flowCache.set("chatFlow", flowData);
+    console.log(`Flow loaded successfully: ${flowData.length} nodes`);
+    return flowData;
+
+  } catch (err) {
+    console.error("Error loading Google Sheet:", err);
+    return [];
+  }
 }
 
-// ---------- Chatbot Logic ----------
+
+// =====================================================
+// ---------- Chatbot Logic Functions -------------------
+// =====================================================
 function getNodeByCtaId(ctaId) {
   const flow = flowCache.get('chatFlow') || [];
   for (const node of flow) {
@@ -62,10 +78,14 @@ function getNodeByKeyword(message) {
   return null;
 }
 
-// ---------- Send WhatsApp Message ----------
+
+// =====================================================
+// ---------- WhatsApp Sender ---------------------------
+// =====================================================
 async function sendWhatsAppMessage(phoneNumber, text, ctas = [], media = null) {
-  const token = process.env.WHATSAPP_TOKEN; 
-  const phoneId = process.env.WHATSAPP_PHONE_ID; 
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneId = process.env.WHATSAPP_PHONE_ID;
+
   const url = `https://graph.facebook.com/v17.0/${phoneId}/messages`;
 
   const body = {
@@ -83,7 +103,10 @@ async function sendWhatsAppMessage(phoneNumber, text, ctas = [], media = null) {
       type: "button",
       body: { text },
       action: {
-        buttons: ctas.map(c => ({ type: "reply", reply: { id: c.id, title: c.text } }))
+        buttons: ctas.map(c => ({
+          type: "reply",
+          reply: { id: c.id, title: c.text }
+        }))
       }
     };
   } else {
@@ -93,19 +116,27 @@ async function sendWhatsAppMessage(phoneNumber, text, ctas = [], media = null) {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
       body: JSON.stringify(body)
     });
+
     const json = await res.json();
     console.log("WhatsApp reply sent:", json);
     return json;
-  } catch (e) {
-    console.error("WhatsApp send error:", e);
+
+  } catch (err) {
+    console.error("WhatsApp send error:", err);
     return null;
   }
 }
 
-// ---------- Webhook ----------
+
+// =====================================================
+// ---------- Webhook Handler ---------------------------
+// =====================================================
 app.post('/webhook', async (req, res) => {
   try {
     const data = req.body;
@@ -113,21 +144,25 @@ app.post('/webhook', async (req, res) => {
     if (!entry) return res.sendStatus(200);
 
     const messages = entry.changes?.[0]?.value?.messages || [];
+
     for (const msg of messages) {
       const phone = msg.from;
       const text = msg.text?.body || "";
       const ctaId = msg.button?.payload || null;
+
       let nodeToSend = null;
 
-      // Interactive node triggered by CTA
+      // CTA flow
       if (ctaId) {
         const result = getNodeByCtaId(ctaId);
         if (result) {
-          nodeToSend = flowCache.get('chatFlow').find(n => n.node_id === result.next_id) || result.node;
+          nodeToSend =
+            flowCache.get('chatFlow').find(n => n.node_id === result.next_id)
+            || result.node;
         }
       }
 
-      // Normal message keyword search
+      // Keyword flow
       if (!nodeToSend && text) {
         nodeToSend = getNodeByKeyword(text);
       }
@@ -140,24 +175,31 @@ app.post('/webhook', async (req, res) => {
         };
       }
 
-      // Send WhatsApp reply
-      await sendWhatsAppMessage(phone, nodeToSend.text, nodeToSend.ctas, nodeToSend.media_url || null);
+      await sendWhatsAppMessage(
+        phone,
+        nodeToSend.text,
+        nodeToSend.ctas,
+        nodeToSend.media_url || null
+      );
     }
 
     res.sendStatus(200);
-  } catch (e) {
-    console.error("Webhook error:", e);
+
+  } catch (err) {
+    console.error("Webhook error:", err);
     res.sendStatus(500);
   }
 });
 
-// ---------- Startup ----------
+
+// =====================================================
+// ---------- Startup -----------------------------------
+// =====================================================
 (async () => {
   await loadFlowFromGoogleSheet(process.env.GOOGLE_SHEET_ID);
   const PORT = 8080;
   app.listen(PORT, () => console.log(`WhatsApp Chatbot running on port ${PORT}`));
 })();
-
 
 
 
