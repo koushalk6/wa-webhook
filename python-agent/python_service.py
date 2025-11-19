@@ -1,4 +1,4 @@
-\*
+"""
 import json
 import asyncio
 from aiohttp import web
@@ -98,4 +98,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8030))  # Use the Cloud Run environment variable
     web.run_app(app, port=port)
 
-*\
+"""
