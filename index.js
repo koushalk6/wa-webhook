@@ -1,3 +1,4 @@
+
 // index.js
 require('dotenv').config();
 const express = require('express');
@@ -10,6 +11,40 @@ app.use(express.json({ limit: '10mb' }));
 
 // ---------- Cache ----------
 const flowCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+
+// ---------------------------------------------------------------------
+// ✅ META WEBHOOK VERIFICATION (OLD WORKING CODE)
+// ---------------------------------------------------------------------
+const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "mySuperSecret123!@";
+
+app.get('/', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log("META VERIFY:", { mode, token, challenge });
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log("Webhook verified successfully.");
+    return res.status(200).send(challenge);
+  }
+
+  console.log("Webhook verification failed: Token mismatch");
+  return res.status(403).send("Verification token mismatch");
+});
+
+// ---------------------------------------------------------------------
+// 🛑 IMPORTANT
+// Some people configure webhook URL as "/" in Meta.
+// So we MUST also accept POST "/" and redirect to /webhook handler.
+// ---------------------------------------------------------------------
+app.post('/', (req, res) => {
+  console.log("POST / hit → forwarding to /webhook handler");
+
+  // Simply forward req.body to /webhook logic
+  req.url = '/webhook';
+  return webhookHandler(req, res);
+});
 
 
 // =====================================================
@@ -97,6 +132,7 @@ async function sendWhatsAppMessage(phoneNumber, text, ctas = [], media = null) {
   if (media) {
     body.type = "image";
     body.image = { link: media };
+
   } else if (ctas.length) {
     body.type = "interactive";
     body.interactive = {
@@ -109,6 +145,7 @@ async function sendWhatsAppMessage(phoneNumber, text, ctas = [], media = null) {
         }))
       }
     };
+
   } else {
     body.text = { body: text };
   }
@@ -135,9 +172,9 @@ async function sendWhatsAppMessage(phoneNumber, text, ctas = [], media = null) {
 
 
 // =====================================================
-// ---------- Webhook Handler ---------------------------
+// ---------- WEBHOOK HANDLER LOGIC ---------------------
 // =====================================================
-app.post('/webhook', async (req, res) => {
+async function webhookHandler(req, res) {
   try {
     const data = req.body;
     const entry = data.entry?.[0];
@@ -189,7 +226,9 @@ app.post('/webhook', async (req, res) => {
     console.error("Webhook error:", err);
     res.sendStatus(500);
   }
-});
+}
+
+app.post('/webhook', webhookHandler);
 
 
 // =====================================================
@@ -200,13 +239,10 @@ app.post('/webhook', async (req, res) => {
   await loadFlowFromGoogleSheet(process.env.GOOGLE_SHEET_ID);
 
   const PORT = process.env.PORT || 8080;
-
   app.listen(PORT, () =>
     console.log(`WhatsApp Chatbot running on port ${PORT}`)
   );
 })();
-
-
 
 
 
